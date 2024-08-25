@@ -45,11 +45,11 @@ if __name__ == "__main__":
     # Training settings
 
     train_transform = transforms.Compose([
-        transforms.RandomResizedCrop(size=224),
+        transforms.RandomResizedCrop(size=args.r_crop_size),
         transforms.RandomHorizontalFlip(),
         transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
-        transforms.RandomGrayscale(p=0.2),
-        RandomGaussianBlur(probability=0, radius=torch.rand(1).item()*2+2), #Random Gaussian blur with radius between 2 and 4
+        transforms.RandomGrayscale(p=args.p_grayscale),
+        RandomGaussianBlur(probability=args.p_blur, radius=torch.rand(1).item()*(args.max_blur_r-args.min_blur_r)+args.min_blur_r), #Random Gaussian blur with radius between 2 and 4
         transforms.ToTensor()
     ])
     
@@ -57,11 +57,11 @@ if __name__ == "__main__":
 
     if args.val:
         val_transform = transforms.Compose([
-            transforms.RandomResizedCrop(size=224),
+            transforms.RandomResizedCrop(size=args.r_crop_size),
             transforms.RandomHorizontalFlip(),
             transforms.ColorJitter(0.4, 0.4, 0.4, 0.1),
-            transforms.RandomGrayscale(p=0.2),
-            RandomGaussianBlur(probability=0, radius=torch.rand(1).item()*2+2), #Random Gaussian blur with radius between 2 and 4
+            transforms.RandomGrayscale(p=args.p_grayscale),
+            RandomGaussianBlur(probability=args.p_blur, radius=torch.rand(1).item()*(args.max_blur_r-args.min_blur_r)+args.min_blur_r), #Random Gaussian blur with radius between 2 and 4
             transforms.ToTensor()
         ])
         if args.path2valdb == args.path2traindb:
@@ -95,11 +95,8 @@ if __name__ == "__main__":
         loss = F.cross_entropy(logits, labels)
         return loss
 
-    # Model & optimizer
+    # Model
     model = Network(args)
-    optimizer = optim.Adam(model.parameters(), lr=args.lr)
-    # criterion = nn.MSELoss().to(device)
-    scheduler = MultiStepLR(optimizer, milestones=[10, 18, 24], gamma=0.1)
     
     # optionally resume from a checkpoint
     if args.resume:
@@ -121,7 +118,10 @@ if __name__ == "__main__":
         batch_losses = checkpoint.get('batch_losses', [])
         val_batch_losses = checkpoint.get('val_batch_losses', [])
         val_losses = checkpoint.get('val_losses', [])
+        lr = checkpoint.get('lr', [])
+        current_lr = checkpoint.get('current_lr', [])
         print("=> loaded checkpoint '{}' (epoch {})".format(args.resume, checkpoint['epoch']))
+        print("Last used learning rate: {}".format(lr[-1]))
     if not args.no_multigpu:
         model = nn.DataParallel(model)
         print(f"Using {torch.cuda.device_count()} GPUs")
@@ -131,6 +131,13 @@ if __name__ == "__main__":
         batch_losses = []
         val_batch_losses = []
         val_losses = []
+        lr = []
+        current_lr = args.lr
+
+    
+    optimizer = optim.Adam(model.parameters(), lr=args.lr if not args.use_last_lr else current_lr)
+    # criterion = nn.MSELoss().to(device)
+    scheduler = MultiStepLR(optimizer, milestones=args.scheduler_milestones, gamma=args.scheduler_gamma)
 
     # Training
     num_epochs = args.epochs
@@ -147,6 +154,8 @@ if __name__ == "__main__":
     for epoch in range(num_epochs):
         model.train()
         running_loss = 0.0
+        lr.append(optimizer.param_groups[0]["lr"])
+        print(f"Learning rate: {lr[-1]}")
         for imgs in tqdm(iterable=train_loader, desc=f"Epoch {epoch+1}/{num_epochs}"):
             imgs = torch.cat([imgs, imgs], dim=0)  # SimCLR requires two augmentations of the same batch
             imgs = imgs.to(device)
@@ -184,6 +193,7 @@ if __name__ == "__main__":
             val_losses.append(epoch_loss)
 
         scheduler.step()
+        current_lr = optimizer.param_groups[0]["lr"]
 
         if (epoch + 1) % args.save_interval == 0:
             os.makedirs(f"./data/weight/{args.usenet}/{args.dataset}" + weight_folder, exist_ok=True)
@@ -196,6 +206,8 @@ if __name__ == "__main__":
                 'batch_losses': batch_losses,
                 'val_batch_losses': val_batch_losses,
                 'val_losses': val_losses,
+                'lr': lr,
+                'current_lr' : current_lr
             }, checkpoint_filename)
             print(f"Model checkpoint saved at epoch {epoch+1}")
         print(f"Epoch [{epoch+1}/{num_epochs}], Loss: {train_losses[-1]}")
